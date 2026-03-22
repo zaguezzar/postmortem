@@ -5,7 +5,7 @@ import { execSync } from "node:child_process";
 import { dirname } from "node:path";
 import { input, select } from "@inquirer/prompts";
 import { Command } from "commander";
-import { IncidentData, Severity } from "./types.js";
+import { IncidentData, Severity, Status } from "./types.js";
 import { generateReport, getOutputPath } from "./report.js";
 import { listReports, findReport, searchReports } from "./store.js";
 
@@ -26,6 +26,10 @@ const newCmd = program
   .option("--detection <text>", "Why was it not detected?")
   .option("--prevention <text>", "What will prevent it?")
   .option("--severity <level>", "Severity: critical, major, minor", "major")
+  .option("--status <status>", "Status: open, action-items-pending, resolved", "open")
+  .option("--started <time>", "When the incident started (e.g. 2026-03-22T14:00)")
+  .option("--detected <time>", "When the incident was detected")
+  .option("--resolved <time>", "When the incident was resolved")
   .option("--tags <tags>", "Comma-separated tags (e.g. deploy,database)")
   .option("--slug <name>", "Short name for the file (e.g. 'api-outage')")
   .option("-o, --output <path>", "Custom output path (overrides default)")
@@ -37,6 +41,7 @@ program
   .alias("ls")
   .description("List all incident reports")
   .option("--severity <level>", "Filter by severity")
+  .option("--status <status>", "Filter by status")
   .option("--tag <tag>", "Filter by tag")
   .action(runList);
 
@@ -77,7 +82,13 @@ async function runNew(opts: Record<string, string | boolean | undefined>) {
       detectionFailure: opts.detection as string,
       prevention: opts.prevention as string,
       severity: (opts.severity as Severity) || "major",
+      status: (opts.status as Status) || "open",
       tags,
+      timeline: {
+        started: (opts.started as string) || "",
+        detected: (opts.detected as string) || "",
+        resolved: (opts.resolved as string) || "",
+      },
     };
   } else {
     try {
@@ -105,11 +116,14 @@ async function runNew(opts: Record<string, string | boolean | undefined>) {
   console.log(`Saved: ${outPath}`);
 }
 
-function runList(opts: { severity?: string; tag?: string }) {
+function runList(opts: { severity?: string; status?: string; tag?: string }) {
   let reports = listReports();
 
   if (opts.severity) {
     reports = reports.filter((r) => r.severity === opts.severity);
+  }
+  if (opts.status) {
+    reports = reports.filter((r) => r.status === opts.status);
   }
   if (opts.tag) {
     reports = reports.filter((r) => r.tags.includes(opts.tag!));
@@ -125,12 +139,18 @@ function runList(opts: { severity?: string; tag?: string }) {
     major: "\x1b[33m",
     minor: "\x1b[32m",
   };
+  const statusIcon: Record<string, string> = {
+    open: "\x1b[31m●\x1b[0m",
+    "action-items-pending": "\x1b[33m●\x1b[0m",
+    resolved: "\x1b[32m●\x1b[0m",
+  };
   const reset = "\x1b[0m";
 
   for (const r of reports) {
     const color = severityColor[r.severity] || "";
+    const icon = statusIcon[r.status] || "○";
     const tags = r.tags.length > 0 ? ` [${r.tags.join(", ")}]` : "";
-    console.log(`${r.date}  ${color}${r.severity.padEnd(9)}${reset} ${r.filename}${tags}`);
+    console.log(`${icon} ${r.date}  ${color}${r.severity.padEnd(9)}${reset} ${r.filename}${tags}`);
   }
 }
 
@@ -190,6 +210,18 @@ async function promptInteractive(): Promise<IncidentData> {
     ],
     default: "major",
   });
+  const status = await select<Status>({
+    message: "Status?",
+    choices: [
+      { value: "open", name: "open" },
+      { value: "action-items-pending", name: "action-items-pending" },
+      { value: "resolved", name: "resolved" },
+    ],
+    default: "open",
+  });
+  const started = await input({ message: "When did it start? (e.g. 2026-03-22T14:00)" });
+  const detected = await input({ message: "When was it detected?" });
+  const resolved = await input({ message: "When was it resolved?" });
   const summary = await input({ message: "What broke?" });
   const impact = await input({ message: "What was the impact?" });
   const rootCause = await input({ message: "What was the root cause?" });
@@ -198,5 +230,9 @@ async function promptInteractive(): Promise<IncidentData> {
   const tagsRaw = await input({ message: "Tags? (comma-separated, or leave empty)" });
   const tags = tagsRaw.split(",").map((t) => t.trim()).filter(Boolean);
 
-  return { summary, impact, rootCause, detectionFailure, prevention, severity, tags };
+  return {
+    summary, impact, rootCause, detectionFailure, prevention,
+    severity, status, tags,
+    timeline: { started, detected, resolved },
+  };
 }
