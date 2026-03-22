@@ -8,17 +8,20 @@ import { Command } from "commander";
 import { IncidentData, Severity, Status } from "./types.js";
 import { generateReport, getOutputPath } from "./report.js";
 import { listReports, findReport, searchReports } from "./store.js";
+import { launchTUI } from "./ui.js";
 
 const program = new Command();
 
 program
   .name("postmortem")
   .description("Document incidents and extract learnings")
-  .version("1.0.0");
+  .version("1.0.0")
+  .action(() => {
+    launchTUI();
+  });
 
-// Default command: create a new report
-const newCmd = program
-  .command("new", { isDefault: true })
+program
+  .command("new")
   .description("Create a new incident report")
   .option("--summary <text>", "What broke?")
   .option("--impact <text>", "What was the impact?")
