@@ -1,18 +1,25 @@
 #!/usr/bin/env node
 
 import { mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { dirname } from "node:path";
 import { input, select } from "@inquirer/prompts";
 import { Command } from "commander";
 import { IncidentData, Severity } from "./types.js";
 import { generateReport, getOutputPath } from "./report.js";
+import { listReports, findReport, searchReports } from "./store.js";
 
 const program = new Command();
 
 program
   .name("postmortem")
   .description("Document incidents and extract learnings")
-  .version("1.0.0")
+  .version("1.0.0");
+
+// Default command: create a new report
+const newCmd = program
+  .command("new", { isDefault: true })
+  .description("Create a new incident report")
   .option("--summary <text>", "What broke?")
   .option("--impact <text>", "What was the impact?")
   .option("--root-cause <text>", "What was the root cause?")
@@ -23,11 +30,37 @@ program
   .option("--slug <name>", "Short name for the file (e.g. 'api-outage')")
   .option("-o, --output <path>", "Custom output path (overrides default)")
   .option("--stdout", "Print report to stdout instead of saving to file")
-  .action(run);
+  .action(runNew);
+
+program
+  .command("list")
+  .alias("ls")
+  .description("List all incident reports")
+  .option("--severity <level>", "Filter by severity")
+  .option("--tag <tag>", "Filter by tag")
+  .action(runList);
+
+program
+  .command("show <name>")
+  .description("Show a specific report")
+  .action(runShow);
+
+program
+  .command("edit <name>")
+  .description("Open a report in $EDITOR")
+  .action(runEdit);
+
+program
+  .command("search <query>")
+  .alias("grep")
+  .description("Search across all reports")
+  .action(runSearch);
 
 program.parse();
 
-async function run(opts: Record<string, string | boolean | undefined>) {
+// --- Command handlers ---
+
+async function runNew(opts: Record<string, string | boolean | undefined>) {
   const isNonInteractive =
     opts.summary && opts.impact && opts.rootCause && opts.detection && opts.prevention;
 
@@ -71,6 +104,81 @@ async function run(opts: Record<string, string | boolean | undefined>) {
   writeFileSync(outPath, report, "utf-8");
   console.log(`Saved: ${outPath}`);
 }
+
+function runList(opts: { severity?: string; tag?: string }) {
+  let reports = listReports();
+
+  if (opts.severity) {
+    reports = reports.filter((r) => r.severity === opts.severity);
+  }
+  if (opts.tag) {
+    reports = reports.filter((r) => r.tags.includes(opts.tag!));
+  }
+
+  if (reports.length === 0) {
+    console.log("No reports found.");
+    return;
+  }
+
+  const severityColor: Record<string, string> = {
+    critical: "\x1b[31m",
+    major: "\x1b[33m",
+    minor: "\x1b[32m",
+  };
+  const reset = "\x1b[0m";
+
+  for (const r of reports) {
+    const color = severityColor[r.severity] || "";
+    const tags = r.tags.length > 0 ? ` [${r.tags.join(", ")}]` : "";
+    console.log(`${r.date}  ${color}${r.severity.padEnd(9)}${reset} ${r.filename}${tags}`);
+  }
+}
+
+function runShow(name: string) {
+  const report = findReport(name);
+  if (!report) {
+    console.error(`Report not found: ${name}`);
+    process.exit(1);
+  }
+  process.stdout.write(report.content);
+}
+
+function runEdit(name: string) {
+  const report = findReport(name);
+  if (!report) {
+    console.error(`Report not found: ${name}`);
+    process.exit(1);
+  }
+  const editor = process.env.EDITOR || "vi";
+  execSync(`${editor} "${report.path}"`, { stdio: "inherit" });
+}
+
+function runSearch(query: string) {
+  const results = searchReports(query);
+  if (results.length === 0) {
+    console.log(`No results for "${query}".`);
+    return;
+  }
+
+  for (const r of results) {
+    console.log(`\x1b[1m${r.filename}\x1b[0m`);
+    // Show matching lines
+    const lines = r.content.split("\n");
+    const q = query.toLowerCase();
+    for (const line of lines) {
+      if (line.toLowerCase().includes(q)) {
+        const highlighted = line.replace(
+          new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi"),
+          "\x1b[33m$1\x1b[0m"
+        );
+        console.log(`  ${highlighted}`);
+      }
+    }
+    console.log();
+  }
+}
+
+// --- Interactive prompts ---
 
 async function promptInteractive(): Promise<IncidentData> {
   const severity = await select<Severity>({
