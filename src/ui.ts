@@ -1,6 +1,9 @@
 import blessed from "blessed";
-import { unlinkSync } from "node:fs";
+import { mkdirSync, unlinkSync, existsSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { listReports, StoredReport } from "./store.js";
+import { generateReport, getOutputPath } from "./report.js";
+import type { IncidentData, Severity } from "./types.js";
 
 // Tokyo Night color scheme (matching focus)
 const C = {
@@ -302,7 +305,7 @@ export function launchTUI() {
     const k = (key: string) => `{${C.accent}-fg}[${key}]{/}`;
     const l = (text: string) => `{${C.fg}-fg}${text}{/}`;
 
-    const line1 = ` ${k("j/k")} ${l("nav")}  ${k("Tab")} ${l("filter")}  ${k("/")} ${l("search")}  ` +
+    const line1 = ` ${k("j/k")} ${l("nav")}  ${k("Tab")} ${l("filter")}  ${k("n")} ${l("new")}  ${k("/")} ${l("search")}  ` +
       `${k("e")} ${l("edit")}  ${k("d")} ${l("delete")}  ${k("c")} ${l("clear")}  ${k("q")} ${l("quit")}`;
 
     // Summary counts
@@ -466,6 +469,174 @@ export function launchTUI() {
       confirmBox.destroy();
       render();
     });
+  });
+
+  // --- New incident wizard ---
+
+  function promptInput(label: string, defaultVal = ""): Promise<string | null> {
+    return new Promise((resolve) => {
+      const box = blessed.textbox({
+        parent: screen,
+        bottom: 3,
+        left: "center",
+        width: "80%",
+        height: 3,
+        border: { type: "line" },
+        style: {
+          border: { fg: C.accent },
+          bg: C.inputBg,
+          fg: C.fg,
+        },
+        inputOnFocus: true,
+        label: ` ${label} `,
+        tags: true,
+      });
+
+      if (defaultVal) box.setValue(defaultVal);
+
+      // Allow paste via Ctrl+V / Shift+Insert
+      box.key(["C-v", "S-insert"], () => {
+        // blessed doesn't natively support clipboard, but terminal paste
+        // events come through as regular input, so this is handled
+        // by the terminal emulator. No extra handling needed.
+      });
+
+      box.key("escape", () => {
+        box.destroy();
+        screen.render();
+        resolve(null);
+      });
+
+      box.focus();
+      box.readInput((_err, value) => {
+        box.destroy();
+        screen.render();
+        resolve(value ?? "");
+      });
+      screen.render();
+    });
+  }
+
+  function promptSeverity(): Promise<Severity | null> {
+    return new Promise((resolve) => {
+      const severities: Severity[] = ["critical", "major", "minor"];
+      let idx = 1; // default to major
+
+      const box = blessed.box({
+        parent: screen,
+        bottom: 3,
+        left: "center",
+        width: "80%",
+        height: 3,
+        border: { type: "line" },
+        style: {
+          border: { fg: C.accent },
+          bg: C.inputBg,
+          fg: C.fg,
+        },
+        label: " Severity ",
+        tags: true,
+      });
+
+      function renderSelector() {
+        const options = severities.map((s, i) => {
+          const color = severityColors[s];
+          if (i === idx) return `{${color}-fg}{bold}[ ${s.toUpperCase()} ]{/bold}{/}`;
+          return `{${C.dimFg}-fg}  ${s}  {/}`;
+        }).join("   ");
+        box.setContent(` ${options}    {${C.dimFg}-fg}(left/right to pick, enter to confirm){/}`);
+        screen.render();
+      }
+
+      renderSelector();
+      box.focus();
+
+      box.key(["left", "h"], () => {
+        idx = (idx - 1 + severities.length) % severities.length;
+        renderSelector();
+      });
+
+      box.key(["right", "l"], () => {
+        idx = (idx + 1) % severities.length;
+        renderSelector();
+      });
+
+      box.key("return", () => {
+        box.destroy();
+        screen.render();
+        resolve(severities[idx]);
+      });
+
+      box.key("escape", () => {
+        box.destroy();
+        screen.render();
+        resolve(null);
+      });
+    });
+  }
+
+  let isCreating = false;
+
+  screen.key("n", async () => {
+    if (isCreating) return;
+    isCreating = true;
+
+    try {
+      const slug = await promptInput("Short name (e.g. api-outage)");
+      if (slug === null || !slug.trim()) { isCreating = false; return; }
+
+      const severity = await promptSeverity();
+      if (severity === null) { isCreating = false; return; }
+
+      const summary = await promptInput("What broke?");
+      if (summary === null) { isCreating = false; return; }
+
+      const impact = await promptInput("What was the impact?");
+      if (impact === null) { isCreating = false; return; }
+
+      const rootCause = await promptInput("What was the root cause?");
+      if (rootCause === null) { isCreating = false; return; }
+
+      const detectionFailure = await promptInput("Why was it not detected?");
+      if (detectionFailure === null) { isCreating = false; return; }
+
+      const prevention = await promptInput("What will prevent it?");
+      if (prevention === null) { isCreating = false; return; }
+
+      const tagsRaw = await promptInput("Tags (comma-separated, or leave empty)");
+      if (tagsRaw === null) { isCreating = false; return; }
+
+      const tags = tagsRaw.split(",").map((t) => t.trim()).filter(Boolean);
+
+      const data: IncidentData = {
+        summary: summary || "",
+        impact: impact || "",
+        rootCause: rootCause || "",
+        detectionFailure: detectionFailure || "",
+        prevention: prevention || "",
+        severity,
+        status: "open",
+        tags,
+        timeline: { started: "", detected: "", resolved: "" },
+        actionItems: [],
+      };
+
+      const report = generateReport(data);
+      const outPath = getOutputPath(slug.trim());
+      const dir = dirname(outPath);
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      writeFileSync(outPath, report, "utf-8");
+
+      // Refresh and select the new report
+      reports = listReports();
+      const newIdx = reports.findIndex((r) => r.path === outPath);
+      if (newIdx >= 0) selectedIdx = newIdx;
+      applyTab("all");
+      searchQuery = "";
+      render();
+    } finally {
+      isCreating = false;
+    }
   });
 
   // Quit
