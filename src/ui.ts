@@ -1,7 +1,7 @@
 import blessed from "blessed";
 import { mkdirSync, unlinkSync, existsSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { listReports, StoredReport } from "./store.js";
+import { listReports, StoredReport, updateFrontmatter } from "./store.js";
 import { generateReport, getOutputPath } from "./report.js";
 import type { IncidentData, Severity } from "./types.js";
 
@@ -305,8 +305,9 @@ export function launchTUI() {
     const k = (key: string) => `{${C.accent}-fg}[${key}]{/}`;
     const l = (text: string) => `{${C.fg}-fg}${text}{/}`;
 
-    const line1 = ` ${k("j/k")} ${l("nav")}  ${k("Tab")} ${l("filter")}  ${k("n")} ${l("new")}  ${k("/")} ${l("search")}  ` +
-      `${k("e")} ${l("edit")}  ${k("d")} ${l("delete")}  ${k("c")} ${l("clear")}  ${k("q")} ${l("quit")}`;
+    const line1 = ` ${k("j/k")} ${l("nav")}  ${k("Tab")} ${l("filter")}  ${k("n")} ${l("new")}  ${k("r")} ${l("status")}  ` +
+      `${k("t")} ${l("timeline")}  ${k("x")} ${l("severity")}  ${k("g")} ${l("tags")}  ` +
+      `${k("e")} ${l("edit")}  ${k("d")} ${l("delete")}  ${k("q")} ${l("quit")}`;
 
     // Summary counts
     const openCount = reports.filter((r) => r.status === "open").length;
@@ -606,6 +607,15 @@ export function launchTUI() {
       const tagsRaw = await promptInput("Tags (comma-separated, or leave empty)");
       if (tagsRaw === null) { isCreating = false; return; }
 
+      const started = await promptInput("When did it start? (e.g. 2026-03-22T14:00, or leave empty)");
+      if (started === null) { isCreating = false; return; }
+
+      const detected = await promptInput("When was it detected? (or leave empty)");
+      if (detected === null) { isCreating = false; return; }
+
+      const resolved = await promptInput("When was it resolved? (or leave empty)");
+      if (resolved === null) { isCreating = false; return; }
+
       const tags = tagsRaw.split(",").map((t) => t.trim()).filter(Boolean);
 
       const data: IncidentData = {
@@ -617,7 +627,7 @@ export function launchTUI() {
         severity,
         status: "open",
         tags,
-        timeline: { started: "", detected: "", resolved: "" },
+        timeline: { started: started || "", detected: detected || "", resolved: resolved || "" },
         actionItems: [],
       };
 
@@ -637,6 +647,129 @@ export function launchTUI() {
     } finally {
       isCreating = false;
     }
+  });
+
+  // --- Quick actions on selected incident ---
+
+  function promptSelect<T extends string>(label: string, options: { value: T; color: string }[], defaultIdx: number): Promise<T | null> {
+    return new Promise((resolve) => {
+      let idx = defaultIdx;
+
+      const box = blessed.box({
+        parent: screen,
+        bottom: 3,
+        left: "center",
+        width: "80%",
+        height: 3,
+        border: { type: "line" },
+        style: {
+          border: { fg: C.accent },
+          bg: C.inputBg,
+          fg: C.fg,
+        },
+        label: ` ${label} `,
+        tags: true,
+        keys: true,
+        keyable: true,
+      });
+
+      function renderOpts() {
+        const rendered = options.map((o, i) => {
+          if (i === idx) return `{${o.color}-fg}{bold}[ ${o.value.toUpperCase()} ]{/bold}{/}`;
+          return `{${C.dimFg}-fg}  ${o.value}  {/}`;
+        }).join("   ");
+        box.setContent(` ${rendered}    {${C.dimFg}-fg}(left/right, enter to confirm){/}`);
+        screen.render();
+      }
+
+      renderOpts();
+      box.focus();
+
+      box.key(["left", "h"], () => { idx = (idx - 1 + options.length) % options.length; renderOpts(); });
+      box.key(["right", "l"], () => { idx = (idx + 1) % options.length; renderOpts(); });
+      box.key("return", () => { box.destroy(); screen.render(); resolve(options[idx].value); });
+      box.key("escape", () => { box.destroy(); screen.render(); resolve(null); });
+    });
+  }
+
+  // r — resolve / change status
+  screen.key("r", async () => {
+    if (filtered.length === 0) return;
+    const r = filtered[selectedIdx];
+
+    const statusOpts: { value: "open" | "action-items-pending" | "resolved"; color: string }[] = [
+      { value: "open", color: C.red },
+      { value: "action-items-pending", color: C.yellow },
+      { value: "resolved", color: C.green },
+    ];
+    const currentIdx = statusOpts.findIndex((o) => o.value === r.status);
+
+    const newStatus = await promptSelect("Status", statusOpts, Math.max(0, currentIdx));
+    if (newStatus === null) return;
+
+    updateFrontmatter(r, { status: newStatus });
+    reports = listReports();
+    render();
+  });
+
+  // t — edit timeline fields
+  screen.key("t", async () => {
+    if (filtered.length === 0) return;
+    const r = filtered[selectedIdx];
+
+    const started = await promptInput("Started (e.g. 2026-03-22T14:00)");
+    if (started === null) return;
+
+    const detected = await promptInput("Detected");
+    if (detected === null) return;
+
+    const resolved = await promptInput("Resolved");
+    if (resolved === null) return;
+
+    const fields: Record<string, string> = {};
+    if (started) fields.started = started;
+    if (detected) fields.detected = detected;
+    if (resolved) fields.resolved = resolved;
+
+    if (Object.keys(fields).length > 0) {
+      updateFrontmatter(r, fields);
+      reports = listReports();
+      render();
+    }
+  });
+
+  // x — change severity
+  screen.key("x", async () => {
+    if (filtered.length === 0) return;
+    const r = filtered[selectedIdx];
+
+    const sevOpts: { value: Severity; color: string }[] = [
+      { value: "critical", color: C.red },
+      { value: "major", color: C.yellow },
+      { value: "minor", color: C.green },
+    ];
+    const currentIdx = sevOpts.findIndex((o) => o.value === r.severity);
+
+    const newSev = await promptSelect("Severity", sevOpts, Math.max(0, currentIdx));
+    if (newSev === null) return;
+
+    updateFrontmatter(r, { severity: newSev });
+    reports = listReports();
+    render();
+  });
+
+  // g — edit tags
+  screen.key("g", async () => {
+    if (filtered.length === 0) return;
+    const r = filtered[selectedIdx];
+
+    const currentTags = r.tags.join(", ");
+    const tagsRaw = await promptInput("Tags (comma-separated)");
+    if (tagsRaw === null) return;
+
+    updateFrontmatter(r, { tags: tagsRaw || "none" });
+    reports = listReports();
+    render();
   });
 
   // Quit

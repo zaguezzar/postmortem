@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, basename } from "node:path";
 import { DATA_DIR } from "./report.js";
 
@@ -68,4 +68,22 @@ export function searchReports(query: string): StoredReport[] {
   return listReports().filter(
     (r) => r.content.toLowerCase().includes(q) || r.filename.toLowerCase().includes(q)
   );
+}
+
+export function updateFrontmatter(report: StoredReport, fields: Record<string, string>): void {
+  const raw = readFileSync(report.path, "utf-8");
+  const match = raw.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+  if (!match) return;
+
+  const lines = match[1].split("\n");
+  for (const [key, value] of Object.entries(fields)) {
+    const idx = lines.findIndex((l) => l.startsWith(`${key}:`));
+    if (idx >= 0) {
+      lines[idx] = `${key}: ${value}`;
+    } else {
+      lines.push(`${key}: ${value}`);
+    }
+  }
+
+  writeFileSync(report.path, `---\n${lines.join("\n")}\n---\n${match[2]}`, "utf-8");
 }
