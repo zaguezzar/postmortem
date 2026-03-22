@@ -473,8 +473,9 @@ export function launchTUI() {
 
   // --- New incident wizard ---
 
-  function promptInput(label: string, defaultVal = ""): Promise<string | null> {
+  function promptInput(label: string): Promise<string | null> {
     return new Promise((resolve) => {
+      let resolved = false;
       const box = blessed.textbox({
         parent: screen,
         bottom: 3,
@@ -492,27 +493,24 @@ export function launchTUI() {
         tags: true,
       });
 
-      if (defaultVal) box.setValue(defaultVal);
-
-      // Allow paste via Ctrl+V / Shift+Insert
-      box.key(["C-v", "S-insert"], () => {
-        // blessed doesn't natively support clipboard, but terminal paste
-        // events come through as regular input, so this is handled
-        // by the terminal emulator. No extra handling needed.
+      box.on("submit", (value: string) => {
+        if (resolved) return;
+        resolved = true;
+        box.destroy();
+        screen.render();
+        resolve(value ?? "");
       });
 
-      box.key("escape", () => {
+      box.on("cancel", () => {
+        if (resolved) return;
+        resolved = true;
         box.destroy();
         screen.render();
         resolve(null);
       });
 
       box.focus();
-      box.readInput((_err, value) => {
-        box.destroy();
-        screen.render();
-        resolve(value ?? "");
-      });
+      box.readInput(() => {});
       screen.render();
     });
   }
@@ -536,6 +534,8 @@ export function launchTUI() {
         },
         label: " Severity ",
         tags: true,
+        keys: true,
+        keyable: true,
       });
 
       function renderSelector() {
