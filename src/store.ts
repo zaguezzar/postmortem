@@ -7,9 +7,13 @@ export interface StoredReport {
   path: string;
   date: string;
   severity: string;
+  status: string;
   tags: string[];
   title: string;
   content: string;
+  started: string;
+  detected: string;
+  resolved: string;
 }
 
 function parseFrontmatter(raw: string): { meta: Record<string, string>; body: string } {
@@ -41,9 +45,13 @@ export function listReports(): StoredReport[] {
       path,
       date: meta.date || f.slice(0, 10),
       severity: meta.severity || "unknown",
+      status: meta.status || "open",
       tags: meta.tags ? meta.tags.split(",").map((t) => t.trim()).filter(Boolean) : [],
       title: titleMatch ? titleMatch[1] : basename(f, ".md"),
       content: raw,
+      started: meta.started || "",
+      detected: meta.detected || "",
+      resolved: meta.resolved || "",
     };
   });
 }
