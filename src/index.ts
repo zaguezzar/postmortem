@@ -2,9 +2,9 @@
 
 import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
-import { input } from "@inquirer/prompts";
+import { input, select } from "@inquirer/prompts";
 import { Command } from "commander";
-import { IncidentData } from "./types.js";
+import { IncidentData, Severity } from "./types.js";
 import { generateReport, getOutputPath } from "./report.js";
 
 const program = new Command();
@@ -18,6 +18,8 @@ program
   .option("--root-cause <text>", "What was the root cause?")
   .option("--detection <text>", "Why was it not detected?")
   .option("--prevention <text>", "What will prevent it?")
+  .option("--severity <level>", "Severity: critical, major, minor", "major")
+  .option("--tags <tags>", "Comma-separated tags (e.g. deploy,database)")
   .option("--slug <name>", "Short name for the file (e.g. 'api-outage')")
   .option("-o, --output <path>", "Custom output path (overrides default)")
   .option("--stdout", "Print report to stdout instead of saving to file")
@@ -32,12 +34,17 @@ async function run(opts: Record<string, string | boolean | undefined>) {
   let data: IncidentData;
 
   if (isNonInteractive) {
+    const tags = opts.tags
+      ? (opts.tags as string).split(",").map((t) => t.trim()).filter(Boolean)
+      : [];
     data = {
       summary: opts.summary as string,
       impact: opts.impact as string,
       rootCause: opts.rootCause as string,
       detectionFailure: opts.detection as string,
       prevention: opts.prevention as string,
+      severity: (opts.severity as Severity) || "major",
+      tags,
     };
   } else {
     try {
@@ -66,11 +73,22 @@ async function run(opts: Record<string, string | boolean | undefined>) {
 }
 
 async function promptInteractive(): Promise<IncidentData> {
+  const severity = await select<Severity>({
+    message: "Severity?",
+    choices: [
+      { value: "critical", name: "critical" },
+      { value: "major", name: "major" },
+      { value: "minor", name: "minor" },
+    ],
+    default: "major",
+  });
   const summary = await input({ message: "What broke?" });
   const impact = await input({ message: "What was the impact?" });
   const rootCause = await input({ message: "What was the root cause?" });
   const detectionFailure = await input({ message: "Why was it not detected?" });
   const prevention = await input({ message: "What will prevent it?" });
+  const tagsRaw = await input({ message: "Tags? (comma-separated, or leave empty)" });
+  const tags = tagsRaw.split(",").map((t) => t.trim()).filter(Boolean);
 
-  return { summary, impact, rootCause, detectionFailure, prevention };
+  return { summary, impact, rootCause, detectionFailure, prevention, severity, tags };
 }
