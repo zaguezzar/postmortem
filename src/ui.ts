@@ -1,16 +1,33 @@
 import blessed from "blessed";
+import { unlinkSync } from "node:fs";
 import { listReports, StoredReport } from "./store.js";
 
-const severityColor: Record<string, string> = {
-  critical: "red",
-  major: "yellow",
-  minor: "green",
+// Tokyo Night color scheme (matching focus)
+const C = {
+  bg: "#1a1b26",
+  fg: "#c0caf5",
+  border: "#3b4261",
+  headerBg: "#24283b",
+  selectedBg: "#283457",
+  accent: "#bb9af7",
+  dimFg: "#565f89",
+  inputBg: "#1f2335",
+  red: "#f7768e",
+  yellow: "#e0af68",
+  green: "#9ece6a",
+  blue: "#7aa2f7",
 };
 
-const statusIcon: Record<string, string> = {
-  open: "{red-fg}●{/red-fg}",
-  "action-items-pending": "{yellow-fg}●{/yellow-fg}",
-  resolved: "{green-fg}●{/green-fg}",
+const severityColors: Record<string, string> = {
+  critical: C.red,
+  major: C.yellow,
+  minor: C.green,
+};
+
+const statusColors: Record<string, string> = {
+  open: C.red,
+  "action-items-pending": C.yellow,
+  resolved: C.green,
 };
 
 export function launchTUI() {
@@ -18,6 +35,7 @@ export function launchTUI() {
     smartCSR: true,
     title: "postmortem",
     fullUnicode: true,
+    mouse: true,
   });
 
   let reports = listReports();
@@ -29,62 +47,64 @@ export function launchTUI() {
 
   // Header
   const header = blessed.box({
-    parent: screen,
     top: 0,
     left: 0,
     width: "100%",
-    height: 1,
+    height: 3,
+    style: { bg: C.headerBg, fg: C.fg },
     tags: true,
-    style: { bg: "blue", fg: "white" },
   });
 
-  // Left panel: incident list
-  const list = blessed.list({
-    parent: screen,
-    top: 1,
+  // Left panel: incident list (box, not list widget — avoids focus stealing)
+  const listPanel = blessed.box({
+    top: 3,
     left: 0,
-    width: "40%",
-    bottom: 1,
-    tags: true,
+    width: "45%",
+    bottom: 3,
     border: { type: "line" },
-    style: {
-      border: { fg: "gray" },
-      selected: { bg: "blue", fg: "white" },
-      item: { fg: "white" },
-    },
+    style: { border: { fg: C.border }, bg: C.bg, fg: C.fg },
+    tags: true,
     scrollable: true,
     mouse: true,
-    keys: false,
-    vi: false,
+    label: " Incidents ",
   });
 
-  // Right panel: report preview
-  const preview = blessed.box({
-    parent: screen,
-    top: 1,
-    left: "40%",
-    width: "60%",
-    bottom: 1,
-    tags: true,
+  // Right panel: detail view
+  const detailPanel = blessed.box({
+    top: 3,
+    left: "45%",
+    width: "55%",
+    bottom: 3,
     border: { type: "line" },
-    style: { border: { fg: "gray" }, fg: "white" },
+    style: { border: { fg: C.border }, bg: C.bg, fg: C.fg },
+    tags: true,
     scrollable: true,
     alwaysScroll: true,
     mouse: true,
-    keys: false,
-    vi: false,
+    label: " Details ",
   });
 
   // Status bar
   const statusBar = blessed.box({
-    parent: screen,
     bottom: 0,
     left: 0,
     width: "100%",
-    height: 1,
+    height: 3,
+    style: { bg: C.headerBg, fg: C.dimFg },
     tags: true,
-    style: { bg: "black", fg: "gray" },
   });
+
+  screen.append(header);
+  screen.append(listPanel);
+  screen.append(detailPanel);
+  screen.append(statusBar);
+
+  // --- Helpers ---
+
+  function row(label: string, value: string): string {
+    const pad = 12 - label.length;
+    return `{${C.dimFg}-fg}${label}{/}${" ".repeat(Math.max(1, pad))}${value}`;
+  }
 
   function applyFilters() {
     filtered = reports.filter((r) => {
@@ -92,52 +112,164 @@ export function launchTUI() {
       if (filterStatus && r.status !== filterStatus) return false;
       if (searchQuery) {
         const q = searchQuery.toLowerCase();
-        return (
-          r.content.toLowerCase().includes(q) ||
-          r.filename.toLowerCase().includes(q)
-        );
+        return r.content.toLowerCase().includes(q) || r.filename.toLowerCase().includes(q);
       }
       return true;
     });
     if (selectedIdx >= filtered.length) selectedIdx = Math.max(0, filtered.length - 1);
   }
 
-  function renderList() {
-    const items = filtered.map((r, i) => {
-      const icon = statusIcon[r.status] || "○";
-      const sevColor = severityColor[r.severity] || "white";
-      const tags = r.tags.length > 0 ? ` {gray-fg}[${r.tags.join(", ")}]{/gray-fg}` : "";
-      return `${icon} {${sevColor}-fg}${r.severity.padEnd(9)}{/${sevColor}-fg} ${r.date} ${r.filename.replace(/\.md$/, "").slice(11)}${tags}`;
-    });
-    list.setItems(items);
-    list.select(selectedIdx);
-  }
-
-  function renderPreview() {
-    if (filtered.length === 0) {
-      preview.setContent("No reports.");
-      return;
-    }
-    const r = filtered[selectedIdx];
-    // Strip frontmatter for display
-    const body = r.content.replace(/^---\n[\s\S]*?\n---\n/, "").trim();
-    preview.setContent(body);
-    preview.scrollTo(0);
-  }
-
   function renderHeader() {
     const total = reports.length;
     const shown = filtered.length;
-    let filterInfo = "";
-    if (filterSeverity) filterInfo += ` severity:${filterSeverity}`;
-    if (filterStatus) filterInfo += ` status:${filterStatus}`;
-    if (searchQuery) filterInfo += ` search:"${searchQuery}"`;
-    header.setContent(` {bold}postmortem{/bold} — ${shown}/${total} incidents${filterInfo}`);
+
+    const sevFilters = ["critical", "major", "minor"].map((s) => {
+      const color = severityColors[s];
+      if (s === filterSeverity) return `{${color}-fg}{bold}[${s.toUpperCase()}]{/bold}{/}`;
+      return `{${C.dimFg}-fg}${s}{/}`;
+    }).join("  ");
+
+    const statFilters = ["open", "action-items-pending", "resolved"].map((s) => {
+      const color = statusColors[s];
+      const label = s === "action-items-pending" ? "pending" : s;
+      if (s === filterStatus) return `{${color}-fg}{bold}[${label.toUpperCase()}]{/bold}{/}`;
+      return `{${C.dimFg}-fg}${label}{/}`;
+    }).join("  ");
+
+    let searchInfo = "";
+    if (searchQuery) searchInfo = `  {${C.accent}-fg}/${searchQuery}{/}`;
+
+    header.setContent(
+      `\n {${C.accent}-fg}{bold}POSTMORTEM{/bold}{/}  {${C.dimFg}-fg}${shown}/${total}{/}  ${sevFilters}  ${statFilters}${searchInfo}`
+    );
+  }
+
+  function renderList() {
+    if (filtered.length === 0) {
+      listPanel.setContent(`\n  {${C.dimFg}-fg}No incidents found.{/}`);
+      return;
+    }
+
+    const lines = filtered.map((r, i) => {
+      const selected = i === selectedIdx;
+      const prefix = selected ? `{${C.selectedBg}-bg}` : "";
+      const suffix = selected ? "{/}" : "";
+      const cursor = selected ? "{bold}>{/bold}" : " ";
+
+      const statusColor = statusColors[r.status] || C.dimFg;
+      const icon = `{${statusColor}-fg}\u25CF{/}`;
+
+      const sevColor = severityColors[r.severity] || C.fg;
+      const sev = `{${sevColor}-fg}${r.severity.padEnd(9)}{/}`;
+
+      const slug = r.filename.replace(/\.md$/, "").slice(11);
+      const tags = r.tags.length > 0
+        ? ` {${C.yellow}-fg}${r.tags.map((t) => "#" + t).join(" ")}{/}`
+        : "";
+
+      return `${prefix} ${cursor} ${icon} ${sev} {${C.dimFg}-fg}${r.date}{/} ${slug}${tags} ${suffix}`;
+    });
+
+    listPanel.setContent("\n" + lines.join("\n"));
+  }
+
+  function renderDetail() {
+    if (filtered.length === 0) {
+      detailPanel.setContent(`{${C.dimFg}-fg}No incident selected{/}`);
+      return;
+    }
+
+    const r = filtered[selectedIdx];
+    const lines: string[] = [];
+
+    // Title
+    const slug = r.filename.replace(/\.md$/, "").slice(11);
+    lines.push(`{bold}{${C.fg}-fg}${slug}{/bold}{/}`);
+    lines.push("");
+
+    // Metadata
+    const sevColor = severityColors[r.severity] || C.fg;
+    const statColor = statusColors[r.status] || C.fg;
+    lines.push(row("Severity:", `{${sevColor}-fg}${r.severity}{/}`));
+    lines.push(row("Status:", `{${statColor}-fg}${r.status}{/}`));
+    lines.push(row("Date:", r.date));
+
+    if (r.tags.length > 0) {
+      lines.push(row("Tags:", `{${C.yellow}-fg}${r.tags.map((t) => "#" + t).join(" ")}{/}`));
+    }
+
+    // Timeline
+    if (r.started || r.detected || r.resolved) {
+      lines.push("");
+      lines.push(`{${C.dimFg}-fg}--- Timeline ---{/}`);
+      if (r.started) lines.push(row("Started:", r.started));
+      if (r.detected) lines.push(row("Detected:", r.detected));
+      if (r.resolved) lines.push(row("Resolved:", r.resolved));
+
+      if (r.started && r.resolved) {
+        const s = new Date(r.started).getTime();
+        const e = new Date(r.resolved).getTime();
+        if (!isNaN(s) && !isNaN(e) && e > s) {
+          const mins = Math.floor((e - s) / 60000);
+          const hrs = Math.floor(mins / 60);
+          const rem = mins % 60;
+          const dur = hrs > 0 ? `${hrs}h ${rem}m` : `${mins}m`;
+          lines.push(row("Duration:", `{${C.accent}-fg}${dur}{/}`));
+        }
+      }
+    }
+
+    // Sections from the report body
+    const body = r.content.replace(/^---\n[\s\S]*?\n---\n/, "").trim();
+
+    const sections: { name: string; content: string }[] = [];
+    const sectionRegex = /^## (.+)$/gm;
+    let match;
+    const matches: { name: string; start: number }[] = [];
+    while ((match = sectionRegex.exec(body)) !== null) {
+      matches.push({ name: match[1], start: match.index + match[0].length });
+    }
+    for (let i = 0; i < matches.length; i++) {
+      const end = i + 1 < matches.length ? matches[i + 1].start - matches[i + 1].name.length - 3 : body.length;
+      const content = body.slice(matches[i].start, end).trim();
+      sections.push({ name: matches[i].name, content });
+    }
+
+    for (const section of sections) {
+      if (section.name === "Timeline") continue; // Already rendered above
+      lines.push("");
+      lines.push(`{${C.dimFg}-fg}--- ${section.name} ---{/}`);
+
+      // Handle action items specially
+      if (section.name === "Action Items") {
+        for (const line of section.content.split("\n")) {
+          const doneMatch = line.match(/^- \[x\] (.+)$/);
+          const todoMatch = line.match(/^- \[ \] (.+)$/);
+          if (doneMatch) {
+            lines.push(` {${C.green}-fg}\u2714{/} {${C.dimFg}-fg}${doneMatch[1]}{/}`);
+          } else if (todoMatch) {
+            lines.push(` {${C.red}-fg}\u25CB{/} ${todoMatch[1]}`);
+          } else if (line.trim()) {
+            lines.push(` ${line.trim()}`);
+          }
+        }
+      } else {
+        for (const line of section.content.split("\n")) {
+          if (line.trim()) lines.push(` ${line.trim()}`);
+        }
+      }
+    }
+
+    detailPanel.setContent("\n" + lines.join("\n"));
+    detailPanel.scrollTo(0);
   }
 
   function renderStatusBar() {
     statusBar.setContent(
-      " {gray-fg}j/k{/gray-fg} navigate  {gray-fg}/{/gray-fg} search  {gray-fg}s{/gray-fg} severity  {gray-fg}S{/gray-fg} status  {gray-fg}e{/gray-fg} edit  {gray-fg}d{/gray-fg} delete  {gray-fg}c{/gray-fg} clear  {gray-fg}q{/gray-fg} quit"
+      `\n {${C.dimFg}-fg}j/k{/} navigate  {${C.dimFg}-fg}/{/} search  ` +
+      `{${C.dimFg}-fg}s{/} severity  {${C.dimFg}-fg}S{/} status  ` +
+      `{${C.dimFg}-fg}e{/} edit  {${C.dimFg}-fg}d{/} delete  ` +
+      `{${C.dimFg}-fg}c{/} clear  {${C.dimFg}-fg}q{/} quit`
     );
   }
 
@@ -145,42 +277,56 @@ export function launchTUI() {
     applyFilters();
     renderHeader();
     renderList();
-    renderPreview();
+    renderDetail();
     renderStatusBar();
     screen.render();
   }
 
-  // Navigation
+  // --- Key bindings (all on screen, no widget focus issues) ---
+
   screen.key(["j", "down"], () => {
     if (selectedIdx < filtered.length - 1) selectedIdx++;
     renderList();
-    renderPreview();
+    renderDetail();
     screen.render();
   });
 
   screen.key(["k", "up"], () => {
     if (selectedIdx > 0) selectedIdx--;
     renderList();
-    renderPreview();
+    renderDetail();
     screen.render();
   });
 
-  list.on("select item", (_item: blessed.Widgets.BlessedElement, index: number) => {
-    selectedIdx = index;
-    renderPreview();
-    screen.render();
+  // Mouse click on list panel
+  listPanel.on("click", (data: { y: number }) => {
+    const clickedLine = data.y - (listPanel.atop as number) - 1; // subtract border
+    const idx = clickedLine - 1; // subtract content padding
+    if (idx >= 0 && idx < filtered.length) {
+      selectedIdx = idx;
+      renderList();
+      renderDetail();
+      screen.render();
+    }
   });
 
   // Search
   screen.key("/", () => {
     const searchBox = blessed.textbox({
       parent: screen,
-      bottom: 0,
-      left: 0,
-      width: "100%",
-      height: 1,
-      style: { bg: "black", fg: "white" },
+      bottom: 3,
+      left: "center",
+      width: "80%",
+      height: 3,
+      border: { type: "line" },
+      style: {
+        border: { fg: C.accent },
+        bg: C.inputBg,
+        fg: C.fg,
+      },
       inputOnFocus: true,
+      label: " Search ",
+      tags: true,
     });
     searchBox.focus();
     searchBox.readInput((_err, value) => {
@@ -189,6 +335,14 @@ export function launchTUI() {
       render();
     });
     screen.render();
+  });
+
+  // Escape to clear search
+  screen.key("escape", () => {
+    if (searchQuery) {
+      searchQuery = "";
+      render();
+    }
   });
 
   // Cycle severity filter
@@ -230,22 +384,22 @@ export function launchTUI() {
   screen.key("d", () => {
     if (filtered.length === 0) return;
     const r = filtered[selectedIdx];
-    const confirm = blessed.question({
+    const confirmBox = blessed.question({
       parent: screen,
       top: "center",
       left: "center",
       width: 50,
       height: 5,
       border: { type: "line" },
-      style: { border: { fg: "red" }, fg: "white" },
+      style: { border: { fg: C.red }, bg: C.inputBg, fg: C.fg },
+      tags: true,
     });
-    confirm.ask(`Delete ${r.filename}?`, (err, ok) => {
+    confirmBox.ask(`Delete ${r.filename}?`, (_err, ok) => {
       if (ok) {
-        const { unlinkSync } = require("node:fs");
         unlinkSync(r.path);
         reports = listReports();
       }
-      confirm.destroy();
+      confirmBox.destroy();
       render();
     });
   });
