@@ -7,6 +7,11 @@ export interface Timeline {
   resolved: string;
 }
 
+export interface ActionItem {
+  text: string;
+  done: boolean;
+}
+
 export interface IncidentData {
   summary: string;
   impact: string;
@@ -17,4 +22,5 @@ export interface IncidentData {
   status: Status;
   tags: string[];
   timeline: Timeline;
+  actionItems: ActionItem[];
 }

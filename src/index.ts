@@ -5,7 +5,7 @@ import { execSync } from "node:child_process";
 import { dirname } from "node:path";
 import { input, select } from "@inquirer/prompts";
 import { Command } from "commander";
-import { IncidentData, Severity, Status } from "./types.js";
+import { ActionItem, IncidentData, Severity, Status } from "./types.js";
 import { generateReport, getOutputPath } from "./report.js";
 import { listReports, findReport, searchReports } from "./store.js";
 import { launchTUI } from "./ui.js";
@@ -34,6 +34,7 @@ program
   .option("--detected <time>", "When the incident was detected")
   .option("--resolved <time>", "When the incident was resolved")
   .option("--tags <tags>", "Comma-separated tags (e.g. deploy,database)")
+  .option("--actions <items>", "Comma-separated action items")
   .option("--slug <name>", "Short name for the file (e.g. 'api-outage')")
   .option("-o, --output <path>", "Custom output path (overrides default)")
   .option("--stdout", "Print report to stdout instead of saving to file")
@@ -64,6 +65,11 @@ program
   .description("Search across all reports")
   .action(runSearch);
 
+program
+  .command("stats")
+  .description("Show incident statistics")
+  .action(runStats);
+
 program.parse();
 
 // --- Command handlers ---
@@ -77,6 +83,9 @@ async function runNew(opts: Record<string, string | boolean | undefined>) {
   if (isNonInteractive) {
     const tags = opts.tags
       ? (opts.tags as string).split(",").map((t) => t.trim()).filter(Boolean)
+      : [];
+    const actionItems: ActionItem[] = opts.actions
+      ? (opts.actions as string).split(",").map((t) => ({ text: t.trim(), done: false })).filter((a) => a.text)
       : [];
     data = {
       summary: opts.summary as string,
@@ -92,6 +101,7 @@ async function runNew(opts: Record<string, string | boolean | undefined>) {
         detected: (opts.detected as string) || "",
         resolved: (opts.resolved as string) || "",
       },
+      actionItems,
     };
   } else {
     try {
@@ -201,6 +211,89 @@ function runSearch(query: string) {
   }
 }
 
+function runStats() {
+  const reports = listReports();
+
+  if (reports.length === 0) {
+    console.log("No reports found.");
+    return;
+  }
+
+  // Count by severity
+  const bySeverity: Record<string, number> = {};
+  const byStatus: Record<string, number> = {};
+  const byMonth: Record<string, number> = {};
+  const tagCounts: Record<string, number> = {};
+  const durations: number[] = [];
+
+  for (const r of reports) {
+    bySeverity[r.severity] = (bySeverity[r.severity] || 0) + 1;
+    byStatus[r.status] = (byStatus[r.status] || 0) + 1;
+
+    const month = r.date.slice(0, 7);
+    byMonth[month] = (byMonth[month] || 0) + 1;
+
+    for (const tag of r.tags) {
+      tagCounts[tag] = (tagCounts[tag] || 0) + 1;
+    }
+
+    if (r.started && r.resolved) {
+      const s = new Date(r.started).getTime();
+      const e = new Date(r.resolved).getTime();
+      if (!isNaN(s) && !isNaN(e) && e > s) {
+        durations.push(e - s);
+      }
+    }
+  }
+
+  const bold = "\x1b[1m";
+  const reset = "\x1b[0m";
+  const red = "\x1b[31m";
+  const yellow = "\x1b[33m";
+  const green = "\x1b[32m";
+
+  console.log(`\n${bold}Incident Statistics${reset}`);
+  console.log(`Total: ${reports.length}\n`);
+
+  console.log(`${bold}By Severity${reset}`);
+  console.log(`  ${red}critical${reset}: ${bySeverity["critical"] || 0}`);
+  console.log(`  ${yellow}major${reset}:    ${bySeverity["major"] || 0}`);
+  console.log(`  ${green}minor${reset}:    ${bySeverity["minor"] || 0}`);
+
+  console.log(`\n${bold}By Status${reset}`);
+  console.log(`  ${red}open${reset}:                 ${byStatus["open"] || 0}`);
+  console.log(`  ${yellow}action-items-pending${reset}: ${byStatus["action-items-pending"] || 0}`);
+  console.log(`  ${green}resolved${reset}:             ${byStatus["resolved"] || 0}`);
+
+  const sortedMonths = Object.entries(byMonth).sort(([a], [b]) => b.localeCompare(a));
+  if (sortedMonths.length > 0) {
+    console.log(`\n${bold}By Month${reset}`);
+    for (const [month, count] of sortedMonths) {
+      const bar = "█".repeat(count);
+      console.log(`  ${month}  ${bar} ${count}`);
+    }
+  }
+
+  const sortedTags = Object.entries(tagCounts).sort(([, a], [, b]) => b - a);
+  if (sortedTags.length > 0) {
+    console.log(`\n${bold}Top Tags${reset}`);
+    for (const [tag, count] of sortedTags.slice(0, 10)) {
+      console.log(`  ${tag}: ${count}`);
+    }
+  }
+
+  if (durations.length > 0) {
+    const avg = durations.reduce((a, b) => a + b, 0) / durations.length;
+    const avgMins = Math.floor(avg / 60000);
+    const hrs = Math.floor(avgMins / 60);
+    const mins = avgMins % 60;
+    const avgStr = hrs > 0 ? `${hrs}h ${mins}m` : `${avgMins}m`;
+    console.log(`\n${bold}Mean Time to Resolve${reset}: ${avgStr} (from ${durations.length} incidents)`);
+  }
+
+  console.log();
+}
+
 // --- Interactive prompts ---
 
 async function promptInteractive(): Promise<IncidentData> {
@@ -233,9 +326,21 @@ async function promptInteractive(): Promise<IncidentData> {
   const tagsRaw = await input({ message: "Tags? (comma-separated, or leave empty)" });
   const tags = tagsRaw.split(",").map((t) => t.trim()).filter(Boolean);
 
+  const actionItems: ActionItem[] = [];
+  let addMore = true;
+  while (addMore) {
+    const item = await input({ message: "Action item? (leave empty to finish)" });
+    if (!item.trim()) {
+      addMore = false;
+    } else {
+      actionItems.push({ text: item.trim(), done: false });
+    }
+  }
+
   return {
     summary, impact, rootCause, detectionFailure, prevention,
     severity, status, tags,
     timeline: { started, detected, resolved },
+    actionItems,
   };
 }

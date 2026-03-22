@@ -58,6 +58,9 @@ ${data.detectionFailure}
 
 ## Prevention
 ${data.prevention}
+
+## Action Items
+${data.actionItems.length > 0 ? data.actionItems.map((a) => `- [${a.done ? "x" : " "}] ${a.text}`).join("\n") : "_No action items_"}
 `;
 }
 
