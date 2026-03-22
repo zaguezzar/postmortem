@@ -45,6 +45,27 @@ export function launchTUI() {
   let filterSeverity = "";
   let filterStatus = "";
 
+  type FilterTab = "all" | "critical" | "major" | "minor" | "open" | "pending" | "resolved";
+  const TABS: FilterTab[] = ["all", "critical", "major", "minor", "open", "pending", "resolved"];
+  let activeTab: FilterTab = "all";
+
+  function applyTab(tab: FilterTab) {
+    activeTab = tab;
+    if (tab === "all") {
+      filterSeverity = "";
+      filterStatus = "";
+    } else if (tab === "critical" || tab === "major" || tab === "minor") {
+      filterSeverity = tab;
+      filterStatus = "";
+    } else if (tab === "pending") {
+      filterSeverity = "";
+      filterStatus = "action-items-pending";
+    } else {
+      filterSeverity = "";
+      filterStatus = tab;
+    }
+  }
+
   // Header
   const header = blessed.box({
     top: 0,
@@ -76,6 +97,7 @@ export function launchTUI() {
     width: "55%",
     bottom: 3,
     border: { type: "line" },
+    padding: { left: 2, right: 2, top: 0, bottom: 0 },
     style: { border: { fg: C.border }, bg: C.bg, fg: C.fg },
     tags: true,
     scrollable: true,
@@ -119,28 +141,40 @@ export function launchTUI() {
     if (selectedIdx >= filtered.length) selectedIdx = Math.max(0, filtered.length - 1);
   }
 
+  function tabCount(tab: FilterTab): number {
+    if (tab === "all") return reports.length;
+    if (tab === "critical" || tab === "major" || tab === "minor") {
+      return reports.filter((r) => r.severity === tab).length;
+    }
+    const status = tab === "pending" ? "action-items-pending" : tab;
+    return reports.filter((r) => r.status === status).length;
+  }
+
+  function tabColor(tab: FilterTab): string {
+    if (tab === "critical") return C.red;
+    if (tab === "major") return C.yellow;
+    if (tab === "minor") return C.green;
+    if (tab === "open") return C.red;
+    if (tab === "pending") return C.yellow;
+    if (tab === "resolved") return C.green;
+    return C.fg;
+  }
+
   function renderHeader() {
-    const total = reports.length;
-    const shown = filtered.length;
-
-    const sevFilters = ["critical", "major", "minor"].map((s) => {
-      const color = severityColors[s];
-      if (s === filterSeverity) return `{${color}-fg}{bold}[${s.toUpperCase()}]{/bold}{/}`;
-      return `{${C.dimFg}-fg}${s}{/}`;
-    }).join("  ");
-
-    const statFilters = ["open", "action-items-pending", "resolved"].map((s) => {
-      const color = statusColors[s];
-      const label = s === "action-items-pending" ? "pending" : s;
-      if (s === filterStatus) return `{${color}-fg}{bold}[${label.toUpperCase()}]{/bold}{/}`;
-      return `{${C.dimFg}-fg}${label}{/}`;
-    }).join("  ");
+    const tabs = TABS.map((tab) => {
+      const count = tabCount(tab);
+      const color = tabColor(tab);
+      if (tab === activeTab) {
+        return `{${color}-fg}{bold} [${tab.toUpperCase()}] (${count}) {/bold}{/}`;
+      }
+      return `{${C.dimFg}-fg} ${tab} (${count}) {/}`;
+    }).join(" ");
 
     let searchInfo = "";
     if (searchQuery) searchInfo = `  {${C.accent}-fg}/${searchQuery}{/}`;
 
     header.setContent(
-      `\n {${C.accent}-fg}{bold}POSTMORTEM{/bold}{/}  {${C.dimFg}-fg}${shown}/${total}{/}  ${sevFilters}  ${statFilters}${searchInfo}`
+      `\n {${C.accent}-fg}{bold}POSTMORTEM{/bold}{/}  ${tabs}${searchInfo}`
     );
   }
 
@@ -265,12 +299,23 @@ export function launchTUI() {
   }
 
   function renderStatusBar() {
-    statusBar.setContent(
-      `\n {${C.dimFg}-fg}j/k{/} navigate  {${C.dimFg}-fg}/{/} search  ` +
-      `{${C.dimFg}-fg}s{/} severity  {${C.dimFg}-fg}S{/} status  ` +
-      `{${C.dimFg}-fg}e{/} edit  {${C.dimFg}-fg}d{/} delete  ` +
-      `{${C.dimFg}-fg}c{/} clear  {${C.dimFg}-fg}q{/} quit`
-    );
+    const k = (key: string) => `{${C.accent}-fg}[${key}]{/}`;
+    const l = (text: string) => `{${C.fg}-fg}${text}{/}`;
+
+    const line1 = ` ${k("j/k")} ${l("nav")}  ${k("Tab")} ${l("filter")}  ${k("/")} ${l("search")}  ` +
+      `${k("e")} ${l("edit")}  ${k("d")} ${l("delete")}  ${k("c")} ${l("clear")}  ${k("q")} ${l("quit")}`;
+
+    // Summary counts
+    const openCount = reports.filter((r) => r.status === "open").length;
+    const pendingCount = reports.filter((r) => r.status === "action-items-pending").length;
+    const resolvedCount = reports.filter((r) => r.status === "resolved").length;
+    const parts: string[] = [];
+    if (openCount > 0) parts.push(`{${C.red}-fg}${openCount} open{/}`);
+    if (pendingCount > 0) parts.push(`{${C.yellow}-fg}${pendingCount} pending{/}`);
+    if (resolvedCount > 0) parts.push(`{${C.green}-fg}${resolvedCount} resolved{/}`);
+    const line2 = ` ${parts.join(" / ")}`;
+
+    statusBar.setContent(`${line1}\n${line2}`);
   }
 
   function render() {
@@ -345,26 +390,45 @@ export function launchTUI() {
     }
   });
 
-  // Cycle severity filter
-  screen.key("s", () => {
-    const levels = ["", "critical", "major", "minor"];
-    const idx = levels.indexOf(filterSeverity);
-    filterSeverity = levels[(idx + 1) % levels.length];
+  // Tab cycles through filter tabs
+  screen.key("tab", () => {
+    const idx = TABS.indexOf(activeTab);
+    applyTab(TABS[(idx + 1) % TABS.length]);
     render();
   });
 
-  // Cycle status filter
-  screen.key("S", () => {
-    const statuses = ["", "open", "action-items-pending", "resolved"];
-    const idx = statuses.indexOf(filterStatus);
-    filterStatus = statuses[(idx + 1) % statuses.length];
+  // Shift-Tab cycles backwards
+  screen.key("S-tab", () => {
+    const idx = TABS.indexOf(activeTab);
+    applyTab(TABS[(idx - 1 + TABS.length) % TABS.length]);
     render();
+  });
+
+  // Click on header to select tab
+  header.on("click", (data: { x: number }) => {
+    // Map click x position to tab — find which tab region was clicked
+    // This is approximate since blessed tags make exact measurement hard
+    const headerText = header.getContent();
+    const strippedParts: { tab: FilterTab; start: number; end: number }[] = [];
+    let pos = 13; // skip "POSTMORTEM  "
+    for (const tab of TABS) {
+      const label = tab.toUpperCase();
+      const len = label.length + 8; // account for brackets, count, spaces
+      strippedParts.push({ tab, start: pos, end: pos + len });
+      pos += len + 1;
+    }
+    for (const part of strippedParts) {
+      if (data.x >= part.start && data.x < part.end) {
+        applyTab(part.tab);
+        render();
+        return;
+      }
+    }
   });
 
   // Clear filters
   screen.key("c", () => {
-    filterSeverity = "";
-    filterStatus = "";
+    applyTab("all");
     searchQuery = "";
     render();
   });
